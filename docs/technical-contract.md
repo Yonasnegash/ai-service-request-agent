@@ -1,39 +1,51 @@
+# Technical Contract
 
-## Section 1 — Normalized Email Input
+**Project:** AI Service Request Processing Agent
+**Document status:** Design approved; implementation pending
+**Contract version:** 1.0-draft
 
-### Proposed Contract
+## 1. Normalized Email Input
 
-| Field              | Required? | Purpose                                                                    |
-| ------------------ | --------- | -------------------------------------------------------------------------- |
-| source             | Yes       | Identifies the source as email.                                            |
-| provider           | Yes       | Identifies the configured email provider.                                  |
-| mailboxId          | Yes       | Identifies the mailbox that received the message.                          |
-| providerMessageId  | Yes       | Stable provider identifier used for duplicate detection.                   |
-| threadId           | No        | Identifies the email conversation, if available.                           |
-| sender.email       | Yes       | Sender address from the received message.                                  |
-| subject            | Yes       | Email subject; may be an empty string if absent.                           |
-| bodyText           | Yes       | Normalized plain-text content; may be empty but must be bounded in size.   |
-| receivedAt         | Yes       | Message receipt timestamp in ISO 8601 format.                              |
-| attachmentMetadata | Yes       | Array describing attachments without processing their contents in the MVP. |
+The application accepts incoming service requests through a normalized email input contract. The email adapter is responsible for translating provider-specific messages into this format before registering a case.
 
----
+### 1.1 Required fields
 
-### Validation and Trust Rules
+- `source`: required; must be `email`.
+- `provider`: required; identifies the configured email provider.
+- `mailboxId`: required; identifies the configured mailbox.
+- `providerMessageId`: required; the provider-assigned message identifier.
+- `threadId`: optional email thread identifier.
+- `sender.email`: required sender email address.
+- `subject`: required string; may be empty.
+- `bodyText`: required string; may be empty, subject to configured size limits.
+- `receivedAt`: required ISO 8601 timestamp containing a timezone.
+- `attachmentMetadata`: required array containing attachment metadata only.
 
-- **Provider and mailbox identity**: must come from trusted integration configuration, not from arbitrary email content or an untrusted public request.
-- **Message identity**: provider, mailboxId, and providerMessageId together identify a message for idempotency.
-- **Sender**: validate the email address format, but treat it as unverified identity unless the integration provides separate verification.
-- **Subject and body**: treat all content as untrusted input. Bound the accepted sizes and normalize the text before classification.
-- **Timestamp**: require a valid ISO 8601 timestamp with timezone information.
-- **Attachments**: accept metadata only; do not download or process attachment contents in the MVP.
-- **Size limits**: configure explicit maximums for message body, subject, and attachment metadata. We'll choose concrete values before implementation.
-- **Duplicate delivery**: a repeated message identity must return the existing case and must not create another initial processing job. Enforce this with a PostgreSQL uniqueness constraint, not only an application-level check.
+The MVP does not process attachment contents.
 
----
+### 1.2 Validation and trust boundaries
 
-### Example Normalized Message
+The application must validate required fields, identifier formats, timestamp validity, and configured message-size limits.
 
-> This is illustrative synthetic data, not a real customer email.
+The `provider` and `mailboxId` values must come from trusted integration configuration rather than arbitrary external input.
+
+A syntactically valid sender email address does not prove the sender's identity. Email content, including subject, body, and sender-provided text, must be treated as untrusted input.
+
+### 1.3 Idempotency
+
+The unique identity of an incoming email is:
+
+`(provider, mailboxId, providerMessageId)`
+
+The database must enforce uniqueness for this combination. Application-level duplicate checks alone are insufficient because concurrent deliveries may race.
+
+If the same provider message is delivered more than once, the application must return or identify the existing case without creating another case or initial processing job.
+
+Messages with different provider message IDs that may represent the same request must be treated as potential duplicates when identified by the duplicate-detection mechanism. The MVP must not automatically merge cases based only on similarity.
+
+### 1.4 Example normalized input
+
+The following synthetic example illustrates the contract:
 
 ```json
 {
@@ -45,28 +57,31 @@
   "sender": {
     "email": "customer@example.com"
   },
-  "subject": "Payment status inquiry",
-  "bodyText": "I made a payment but the status is still pending.",
-  "receivedAt": "2026-10-23T09:30:00Z",
+  "subject": "Payment still pending",
+  "bodyText": "My payment has been pending since yesterday.",
+  "receivedAt": "2026-10-20T09:30:00+03:00",
   "attachmentMetadata": []
 }
 ```
 
+This example uses synthetic data and does not represent a real customer.
 
-## Section 2 — Classifier Output
+## 2. Classifier Output Contract
 
-### 2.1 Proposed Output Contract
+The classifier analyzes the normalized email and returns a structured proposal. Its output is not an authoritative routing decision and must not directly change case status, assign employees, or initiate customer communication.
 
-| Field              | Type    | Purpose                                                                |
-| ------------------ | ------- | ---------------------------------------------------------------------- |
-| summary            | String  | Concise summary of the service request.                                |
-| categoryCandidates | Array   | Proposed categories from the approved allowlist, ordered by relevance. |
-| missingInformation | Array   | Approved field identifiers for information that appears to be missing. |
-| isAmbiguous        | Boolean | Indicates that the primary issue cannot be determined reliably.        |
-| reviewReasons      | Array   | Proposed reasons why a human may need to review the case.              |
-| modelVersion       | String  | Identifies the model version used, when available.                     |
+### 2.1 Required fields
 
-#### Initial Category Allowlist
+- `summary`: concise summary of the request.
+- `categoryCandidates`: ordered array of candidate categories.
+- `missingInformation`: array of approved field identifiers representing missing information.
+- `isAmbiguous`: boolean indicating whether the classifier considers the classification ambiguous.
+- `reviewReasons`: array of approved review-reason codes suggested by the classifier.
+- `modelVersion`: identifier for the model version used, when available.
+
+### 2.2 Approved categories
+
+The initial category allowlist is:
 
 - `payment_issue`
 - `account_support`
@@ -74,45 +89,42 @@
 - `complaint`
 - `other`
 
-> The application—not the model—will decide the authoritative primary category and destination team.
+The application must validate every returned category against this allowlist.
 
----
+The candidate array must contain at least one valid category, contain no duplicates, and respect a configured maximum length.
 
-### 2.2 Validation Rules
+Missing-information identifiers and review-reason codes must also belong to their respective application-defined allowlists.
 
-- The response must conform to a strict schema. Reject unexpected fields or invalid types.
-- Category values must belong to the approved allowlist.
-- `categoryCandidates` must not be empty, must not contain duplicates, and must have a configured maximum length.
-- `missingInformation` must contain only approved field identifiers.
-- `reviewReasons` must contain only approved reason codes.
-- The application must not trust model-generated team names, status values, permissions, or instructions.
-- If the output is invalid, the application must not route the case using that output. A bounded retry may be attempted; if it still fails, the case must follow the configured human-review or operational recovery path.
-- Model confidence, if introduced later, must not independently authorize automatic routing.
-- For the MVP, do not include a numeric confidence score in this contract. We haven’t selected a model or established calibration, so adding a score now could imply reliability we haven’t demonstrated.
+### 2.3 Approved review-reason codes
 
----
+The initial supported codes are:
 
-### 2.3 Proposed Review Reason Codes
+- `AMBIGUOUS_CATEGORY`
+- `UNKNOWN_CATEGORY`
+- `MISSING_REQUIRED_INFORMATION`
+- `INVALID_MODEL_OUTPUT`
+- `SENSITIVE_REQUEST`
 
-Use stable codes rather than relying on free-form explanations for application decisions.
+These codes are suggestions when returned by the classifier. The application determines which review reasons apply authoritatively.
 
-| Code                         | Meaning                                                         |
-| ---------------------------- | --------------------------------------------------------------- |
-| AMBIGUOUS_CATEGORY           | The primary issue cannot be determined reliably.                |
-| UNKNOWN_CATEGORY             | The request does not fit the supported categories.              |
-| MISSING_REQUIRED_INFORMATION | Information required for the next step appears to be absent.    |
-| INVALID_MODEL_OUTPUT         | The model response failed schema or contract validation.        |
-| SENSITIVE_REQUEST            | The request may require additional human handling under policy. |
+### 2.4 Strict output validation
 
-> These codes are proposed for the contract. The policy engine remains responsible for deciding which reasons actually apply. The model may suggest a reason, but its suggestion is not authoritative.
+The application must validate classifier responses against a strict schema. Required fields, types, array limits, allowed values, and unexpected fields must be checked.
 
----
+Invalid output must not be used to produce a normal routing decision. The system must follow the configured bounded-retry and recovery policy.
 
-### 2.4
+The model must not determine:
 
- Example Classifier Response
+- Final primary or secondary categories.
+- Assigned team or employee.
+- Authoritative case status.
+- Employee permissions or authorization.
+- Whether a customer reply should be sent.
+- Whether a case should be resolved or closed.
 
-> This is synthetic illustrative data.
+The MVP does not use a numeric model-confidence threshold. A model-reported confidence score alone must never authorize routing.
+
+### 2.5 Example classifier response
 
 ```json
 {
@@ -128,31 +140,31 @@ Use stable codes rather than relying on free-form explanations for application d
 }
 ```
 
+The application validates this response before applying routing policy.
+
 ## 3. Authoritative Routing Decision
 
 The application converts validated classifier output into an authoritative routing decision using deterministic business rules and an explicitly versioned routing policy.
 
-The classifier output is an input to this decision, not an instruction to execute. The application must not accept a model-generated team assignment, case status, employee assignment, or action as authoritative.
+The classifier output is an input to the decision, not an instruction to execute.
 
 ### 3.1 Decision fields
 
-The routing decision contains:
+The authoritative routing decision contains:
 
 - `primaryCategory`: the single category selected by the application.
 - `secondaryCategories`: other valid categories retained for context, excluding the primary category.
 - `assignedTeam`: the team selected by the active routing policy.
-- `reviewRequired`: whether a human must review the case before normal processing continues.
-- `reviewReasons`: the authoritative list of reasons requiring review.
-- `missingInformation`: validated field identifiers indicating information needed for follow-up.
-- `policyVersion`: the version of the routing policy used to make the decision.
+- `reviewRequired`: whether human review is required before normal processing continues.
+- `reviewReasons`: authoritative reasons requiring review.
+- `missingInformation`: validated identifiers for information needed.
+- `policyVersion`: version of the routing policy used.
 
-The application generates these fields after validating classifier output and applying the routing policy. The decision must be persisted with the case so the routing result can be explained and audited later.
+The decision must be persisted with the case so the routing result can be explained and audited.
 
 Employee assignment remains a human responsibility and is not determined by the classifier or routing policy.
 
-### 3.2 Approved categories and team mapping
-
-The initial category allowlist and default team mapping are:
+### 3.2 Initial category-to-team mapping
 
 | Category              | Team              |
 | --------------------- | ----------------- |
@@ -162,11 +174,11 @@ The initial category allowlist and default team mapping are:
 | `complaint`         | Customer care     |
 | `other`             | General triage    |
 
-The active routing policy must define a valid team mapping for every approved category. A policy must not become active if any category lacks a valid mapping.
+The active policy must provide a valid team mapping for every approved category. A policy must not become active if any required category lacks a valid mapping.
 
 ### 3.3 Primary category selection
 
-When the classifier returns multiple valid category candidates, the application applies the configured precedence order:
+When multiple valid candidates are returned, the application applies the configured precedence order:
 
 1. `payment_issue`
 2. `account_support`
@@ -176,56 +188,49 @@ When the classifier returns multiple valid category candidates, the application 
 
 The first category in the configured precedence order that appears in the validated candidate list becomes the primary category. Remaining valid candidates are retained as secondary categories in precedence order.
 
-The precedence order is a policy decision and must be explicitly configured and versioned. The initial order above is provisional until confirmed by the business owner, particularly for cases involving complaints alongside other issues.
+This order is provisional until confirmed by the business owner, particularly for requests involving complaints alongside other issues.
 
-If the classifier returns only `other`, the primary category is `other` and the case is routed to General triage.
+If the classifier returns only `other`, the application selects `other` and routes the case to General triage.
 
-If the classifier returns no valid category candidates, or its output fails validation, the application must not invent a normal routing decision. It must follow the invalid-output handling and recovery rules defined in this contract.
+If the classifier returns no valid candidates or its output fails validation, the application must not invent a normal routing decision. It must follow the invalid-output and recovery rules.
 
 ### 3.4 Ambiguity and human review
 
-A case requires human review when the validated result or application checks indicate that the primary issue cannot be determined reliably, the output is invalid, or an approved review condition applies.
+A case requires human review when application checks or validated classification results indicate that the primary issue cannot be determined reliably, invalid output is received, or another approved review condition applies.
 
-At minimum, the application must support these review reasons:
+The application is authoritative for deciding whether a review reason applies. Model-suggested reasons must be validated against application rules.
 
-- `AMBIGUOUS_CATEGORY`
-- `UNKNOWN_CATEGORY`
-- `MISSING_REQUIRED_INFORMATION`
-- `INVALID_MODEL_OUTPUT`
-- `SENSITIVE_REQUEST`
+If the primary issue remains ambiguous, the application must route the case to General triage, set the case status to `NEEDS_REVIEW`, and record at least one applicable review reason.
 
-The application is authoritative for whether a review reason applies. A model-suggested review reason is only a signal and must be validated against application rules.
+The case must not be treated as normally routed merely because the classifier returned a candidate category.
 
-If the primary category remains ambiguous, the application must route the case to General triage and set its case status to `NEEDS_REVIEW`. It must record an applicable review reason. The case must not be treated as normally routed merely because the classifier returned a candidate category.
-
-`other` is the fallback category for a valid classification that does not match a more specific supported category. It is not, by itself, proof that the classifier output is invalid or that human review is required. The active policy may define additional review conditions for unsupported or uncertain requests.
+`other` is the fallback category for a valid classification that does not match a more specific supported category. It does not automatically mean that the output is invalid or that human review is required.
 
 ### 3.5 Missing information
 
 Missing information is tracked separately from the review state.
 
-The application validates all missing-information identifiers against an approved allowlist. It records the validated identifiers in the routing decision.
+The application validates missing-information identifiers against an approved allowlist and records the validated identifiers in the decision.
 
-A case may have missing information without requiring classification review. Conversely, a case may require review even when no information is missing. Both conditions may apply to the same case.
+A case may have missing information without requiring classification review. Conversely, a case may require review even when no information is missing. Both conditions may apply simultaneously.
 
 The agent must not contact the customer automatically. Employees remain responsible for requesting additional information and recording the outcome.
 
-### 3.6 Policy and decision safety
+### 3.6 Policy safety and reproducibility
 
-The routing decision must be reproducible from the validated classifier output, the relevant application checks, and the recorded policy version.
+The routing decision must be reproducible from the validated classifier output, relevant application checks, and recorded policy version.
 
-The application must not use a model-reported confidence score alone to authorize routing. The MVP does not define a numeric confidence threshold; any future threshold must be evaluated against labeled examples before adoption.
+The MVP does not define a numeric confidence threshold. Any future threshold must be evaluated against labeled examples before adoption.
 
-Routing-policy activation must validate required categories, team mappings, precedence configuration, and other required settings. Activated policy versions must be immutable. A change creates a new version.
+Routing-policy activation must validate category mappings, precedence configuration, and required settings. Activated policy versions are immutable; changes must create a new version.
 
 The model cannot override application validation, routing policy, authorization rules, or human-review requirements. The agent cannot send customer replies or resolve or close cases.
-
 
 ## 4. Case Record and Status Lifecycle
 
 Each incoming service request is represented by a persistent case record. The case record is the authoritative representation of the request's processing and business status.
 
-### 4.1 Case record
+### 4.1 Case record fields
 
 A case record must include:
 
@@ -237,12 +242,12 @@ A case record must include:
 - `threadId`: optional email thread identifier.
 - `senderEmail`: normalized sender email address.
 - `subject`: email subject, which may be empty.
-- `bodyText` or an approved content reference: the request content or a reference to its stored location.
+- `bodyText` or an approved content reference: request content or its stored location.
 - `summary`: validated classifier-generated summary.
 - `primaryCategory`: application-selected primary category.
 - `secondaryCategories`: additional valid categories.
 - `assignedTeam`: team selected by the active routing policy.
-- `assignedEmployeeId`: optional employee assignment, managed by authorized staff.
+- `assignedEmployeeId`: optional employee assignment managed by authorized staff.
 - `status`: current case lifecycle status.
 - `reviewReasons`: authoritative reasons requiring human review.
 - `missingInformation`: validated identifiers for information needed.
@@ -251,13 +256,15 @@ A case record must include:
 - `modelVersion`: model version used for classification, when available.
 - `caseVersion`: version number used for optimistic concurrency control.
 - `createdAt` and `updatedAt`: timestamps.
-- `auditHistory`: the case's audit events, stored in the separate append-only audit record structure.
+- `auditHistory`: audit events stored in the separate append-only audit structure.
 
-Processing-job state, retry counters, leases, and individual attempt details are stored in their own records rather than being treated as the case's business status.
+Processing-job state, retry counters, leases, and individual attempt details are stored in separate records.
+
+The final choice between storing email bodies directly in PostgreSQL and storing them elsewhere with a content reference remains open until retention and access controls are defined.
 
 ### 4.2 Case statuses
 
-The MVP supports the following case statuses:
+The MVP supports these case statuses:
 
 - `RECEIVED`: the request has been registered but processing has not yet been completed.
 - `PROCESSING`: classification and routing are in progress.
@@ -265,14 +272,14 @@ The MVP supports the following case statuses:
 - `IN_PROGRESS`: an employee is actively handling the case.
 - `NEEDS_REVIEW`: human review is required before normal processing continues.
 - `WAITING_FOR_CUSTOMER`: an employee is waiting for information from the customer.
-- `RESOLVED`: the employee has recorded that the issue has been resolved.
+- `RESOLVED`: an employee has recorded that the issue has been resolved.
 - `CLOSED`: the case has been formally closed by an authorized employee.
 
-Processing-job statuses are separate and are defined in Section 5.
+Processing-job statuses are separate and defined in Section 5.
 
 ### 4.3 Status transition rules
 
-All case status changes must go through the application’s case lifecycle service. Each transition must be validated, authorized where applicable, and recorded in the audit history.
+All case status changes must go through the application's case lifecycle service. Each transition must be validated, authorized where applicable, and recorded in the audit history.
 
 The following rules apply:
 
@@ -281,14 +288,14 @@ The following rules apply:
 - A successfully processed case with a valid routing decision may move to `OPEN`.
 - A case requiring human review must move to `NEEDS_REVIEW` and include at least one valid review reason.
 - An authorized employee may move an `OPEN` case to `IN_PROGRESS`.
-- An authorized employee may move a case to `WAITING_FOR_CUSTOMER` when additional information is needed from the customer.
+- An authorized employee may move a case to `WAITING_FOR_CUSTOMER` when additional information is needed.
 - When the customer provides the requested information, an employee may return the case to `IN_PROGRESS`.
 - An authorized employee may move a case to `RESOLVED` after recording the resolution.
 - An authorized employee may move a `RESOLVED` case to `CLOSED`.
 - The agent must not independently resolve or close a case.
 - A failed or exhausted processing job must not silently leave a case appearing successfully processed. Recovery behavior must be explicit and auditable.
 
-Any transition not explicitly permitted by the lifecycle rules must be rejected. Concurrent updates must not overwrite newer case state; the application must use `caseVersion` or an equivalent concurrency-control mechanism.
+Any transition not explicitly permitted by lifecycle rules must be rejected. Concurrent updates must not overwrite newer case state; the application must use `caseVersion` or an equivalent concurrency-control mechanism.
 
 ### 4.4 Required invariants
 
@@ -300,18 +307,17 @@ The application must enforce these invariants:
 - A model response cannot directly change a case status.
 - Employee assignment and employee-driven lifecycle actions must be authorized.
 - Every accepted status transition must produce a corresponding audit event in the same database transaction as the status change.
-- Audit events must identify the actor type and, when applicable, the authorized employee or system component responsible for the change.
+- Audit events must identify the actor type and, when applicable, the authorized employee or system component responsible.
 
 ### 4.5 Review completion and reopening
 
 A human reviewer must explicitly record the outcome of a review before the case resumes normal processing. The review outcome and any resulting category, team, or status changes must be validated and audited.
 
-The exact transition after review, and the policy for reopening resolved or closed cases, remain business rules requiring confirmation. Until these rules are defined, the implementation must not invent implicit transitions or allow unrestricted reopening.
-
+The exact transition after review, and the policy for reopening resolved or closed cases, remain business rules requiring confirmation. The implementation must not invent implicit transitions or allow unrestricted reopening.
 
 ## 5. Processing Jobs, Retries, and Idempotency
 
-The system must process incoming service requests reliably even when workers crash, external model providers fail, or requests are delivered more than once.
+The system must process incoming service requests reliably even when workers crash, external model providers fail, or messages are delivered more than once.
 
 Processing jobs are persisted separately from case records. A case represents the business request; a job represents work the system needs to perform.
 
@@ -321,11 +327,11 @@ Each processing job must include:
 
 - `jobId`: unique job identifier.
 - `caseId`: associated case identifier.
-- `jobType`: the type of work, initially `CLASSIFY_CASE` or `RECOVER_CASE`.
+- `jobType`: initially `CLASSIFY_CASE` or `RECOVER_CASE`.
 - `status`: current processing-job status.
 - `attemptCount`: number of attempts made.
 - `availableAt`: earliest time the job may be claimed.
-- `leaseOwner`: identifier of the worker currently holding the lease, when applicable.
+- `leaseOwner`: identifier of the worker holding the lease, when applicable.
 - `leaseExpiresAt`: time after which an abandoned lease may be recovered.
 - `lastErrorCode`: sanitized code describing the most recent failure, when applicable.
 - `createdAt` and `updatedAt`: timestamps.
@@ -333,8 +339,6 @@ Each processing job must include:
 A database constraint must prevent multiple active jobs for the same case and job type where duplicate active work is not intended.
 
 ### 5.2 Job statuses
-
-The MVP supports these job statuses:
 
 - `PENDING`: waiting to be processed.
 - `RUNNING`: currently claimed by a worker.
@@ -356,7 +360,7 @@ Within one transaction, the application must:
 
 The database must enforce uniqueness on `(provider, mailboxId, providerMessageId)`. Application-level checks alone are insufficient because concurrent deliveries may race.
 
-If the same provider message is received again, the system must return or identify the existing case without creating a second case or initial job.
+If the same provider message is received again, the system must identify the existing case without creating a second case or initial job.
 
 Messages with different provider message IDs that may represent the same customer request are potential duplicates. The MVP must flag such cases for human review when the duplicate-detection mechanism identifies them; it must not automatically merge cases solely on similarity.
 
@@ -368,7 +372,7 @@ The implementation should use row locking or an equivalent safe claim mechanism.
 
 Claiming a job, recording the processing attempt, and moving an eligible case to `PROCESSING` must occur in one database transaction.
 
-The lease must be renewed or otherwise managed for long-running work. If a worker loses its lease, it must not commit a classification or routing decision using that expired ownership.
+The lease must be renewed or otherwise managed for long-running work. If a worker loses its lease, it must not commit a classification or routing decision using expired ownership.
 
 The application must use a fencing mechanism, such as a monotonically increasing lease generation or equivalent ownership token, so a stale worker cannot overwrite a newer worker's result.
 
@@ -384,9 +388,9 @@ An attempt record must capture:
 - `attemptNumber`
 - `status`
 - `modelVersion`, when applicable
-- start and finish timestamps
-- retryability classification
-- sanitized error code or outcome metadata
+- Start and finish timestamps.
+- Retryability classification.
+- Sanitized error code or outcome metadata.
 
 Attempt numbers must be allocated safely under concurrent execution. Sensitive email content, credentials, and unnecessary personal information must not be copied into error metadata.
 
@@ -396,7 +400,7 @@ Retries must be bounded and governed by explicit configuration. The policy must 
 
 Transient failures, such as temporary provider unavailability or network errors, may be retried within the configured limit. Permanent failures, such as irrecoverably invalid configuration, must not be retried indefinitely.
 
-Invalid model output must not be routed as if it were valid. The implementation may retry it within a specifically configured limit; if the limit is exhausted, the case must enter an explicit human-review or operational-recovery path.
+Invalid model output must not be routed as if it were valid. The implementation may retry it within a specifically configured limit. If the limit is exhausted, the case must enter an explicit human-review or operational-recovery path.
 
 When retrying, the job must enter `RETRY_WAIT` with an appropriate `availableAt` value. Once retries are exhausted, it must enter `DEAD_LETTER` and trigger the configured recovery or alerting mechanism.
 
@@ -437,7 +441,6 @@ A model call may be repeated after a crash or timeout. The system must therefore
 
 A unique audit `eventKey` or equivalent idempotency mechanism must protect important audit writes. The application must not assume that an external model call and a database transaction can be committed as one atomic operation.
 
-
 ## 6. Validation, Error Handling, and Versioning
 
 The application must validate data at system boundaries, distinguish recoverable failures from permanent failures, and preserve enough version information to explain past decisions.
@@ -460,18 +463,18 @@ Invalid data must not silently pass to the next stage. Validation errors must pr
 
 The application must distinguish at least these failure categories:
 
-- `INVALID_INPUT`: an incoming message fails input validation.
-- `DUPLICATE_INPUT`: the provider message identity already exists; this is handled idempotently rather than treated as a new case.
-- `INVALID_MODEL_OUTPUT`: the classifier response fails the output contract.
-- `MODEL_PROVIDER_ERROR`: the model provider returns an error or is unavailable.
-- `TRANSIENT_INFRASTRUCTURE_ERROR`: a temporary database, network, or dependent-service failure.
+- `INVALID_INPUT`: incoming message fails input validation.
+- `DUPLICATE_INPUT`: provider message identity already exists; handled idempotently rather than treated as a new case.
+- `INVALID_MODEL_OUTPUT`: classifier response fails the output contract.
+- `MODEL_PROVIDER_ERROR`: model provider returns an error or is unavailable.
+- `TRANSIENT_INFRASTRUCTURE_ERROR`: temporary database, network, or dependent-service failure.
 - `PERMANENT_CONFIGURATION_ERROR`: required configuration is missing or invalid.
-- `CONCURRENCY_CONFLICT`: the case version, job ownership, or lease is no longer current.
-- `POLICY_VALIDATION_ERROR`: the routing policy cannot produce a valid decision.
+- `CONCURRENCY_CONFLICT`: case version, job ownership, or lease is no longer current.
+- `POLICY_VALIDATION_ERROR`: routing policy cannot produce a valid decision.
 - `UNAUTHORIZED_ACTION`: an actor attempts an action they are not permitted to perform.
 - `UNEXPECTED_INTERNAL_ERROR`: an unclassified failure that must be recorded safely and investigated.
 
-The implementation must map errors to retry, reject, review, or operational-recovery behavior explicitly. Error names alone do not determine retry behavior; the error-handling policy must define the action for each relevant failure category.
+The implementation must explicitly map errors to retry, reject, review, or operational-recovery behavior. Error names alone do not determine retry behavior.
 
 ### 6.3 Error handling rules
 
@@ -479,7 +482,7 @@ The implementation must map errors to retry, reject, review, or operational-reco
 - Duplicate provider messages must resolve to the existing case without creating duplicate initial work.
 - Invalid classifier output must never be treated as a valid routing decision.
 - Transient failures may be retried within configured limits.
-- Permanent configuration failures must be made visible to operators and must not be retried indefinitely without a configuration change or explicit recovery action.
+- Permanent configuration failures must be visible to operators and must not be retried indefinitely without a configuration change or explicit recovery action.
 - Concurrency conflicts must prevent stale writes. The application may reload current state and retry a safe operation where appropriate.
 - Unauthorized lifecycle actions must be rejected and must not change case state.
 - Unexpected failures must be logged with sanitized diagnostic context and must not expose credentials, full email bodies, or unnecessary personal information.
@@ -491,11 +494,11 @@ The system must record enough version information to reproduce or explain a rout
 
 At minimum, record:
 
-- `policyVersion`: the routing policy used to make the authoritative decision.
-- `modelVersion`: the model identifier or version used for classification, when available.
-- `contractVersion`: the version of the normalized input and classifier output contracts used during processing.
-- An application release or build identifier in operational diagnostics.
-- A schema or migration version for database changes, managed by the migration mechanism.
+- `policyVersion`: routing policy used for the decision.
+- `modelVersion`: model identifier or version used for classification, when available.
+- `contractVersion`: version of the normalized input and classifier output contracts used during processing.
+- Application release or build identifier in operational diagnostics.
+- Schema or migration version for database changes, managed by the migration mechanism.
 
 Activated routing policies are immutable. Changes to category mappings, precedence, review rules, or relevant processing configuration must create a new policy version.
 
@@ -505,7 +508,9 @@ Contract changes must be introduced deliberately. If a new contract version chan
 
 A policy change must not silently rewrite historical decisions. Existing cases retain the policy version used for their recorded decision.
 
-If a case is reprocessed, the system must record the reason for reprocessing and the model, contract, and policy versions used for the new attempt. The application must define whether reprocessing updates the existing case decision or creates a separate reviewable decision record before enabling that behavior in production.
+If a case is reprocessed, the system must record the reason for reprocessing and the model, contract, and policy versions used for the new attempt.
+
+Before enabling reprocessing in production, the application must define whether reprocessing updates the existing case decision or creates a separate reviewable decision record.
 
 Reprocessing must not bypass human-review requirements, duplicate protection, authorization, or audit logging.
 
