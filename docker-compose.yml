@@ -1,0 +1,25 @@
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: ai-service-request-agent-postgres
+    restart: unless-stopped
+    ports:
+      - "${POSTGRES_PORT:-5434}:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-service_request_agent}
+      POSTGRES_USER: ${POSTGRES_USER:-service_agent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local_dev_only_pass}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  postgres_data:
