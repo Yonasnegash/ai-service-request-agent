@@ -2,6 +2,7 @@
 import type { Pool, PoolClient } from 'pg';
 
 import type { NormalizedEmail } from './normalized-email.schema.js';
+import { IntakeRepositoryInvariantError } from './intake.errors.js';
 
 export interface TrustedIntakeContext {
   provider: string;
@@ -48,7 +49,7 @@ export class PostgresIntakeRepository implements IntakeRepository {
       email.provider !== context.provider ||
       email.mailboxId !== context.mailboxId
     ) {
-      throw new Error('Trusted intake context does not match email identity');
+      throw new IntakeRepositoryInvariantError();
     }
 
     const client = await this.pool.connect();
