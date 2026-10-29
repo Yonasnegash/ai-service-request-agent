@@ -9,7 +9,8 @@
         "typecheck": "tsc --noEmit -p tsconfig.test.json",
         "test": "vitest run",
         "test:watch": "vitest",
-        "test:integration": "vitest run --config vitest.integration.config.ts",
+        "test:integration": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/test-integration.ps1",
+        "test:integration:vitest": "vitest run --config vitest.integration.config.ts",
         "lint": "eslint ."
     },
     "type": "module",

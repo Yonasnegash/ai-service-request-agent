@@ -32,18 +32,22 @@ async function createCase(): Promise<string> {
     const result = await pool.query<{ id: string }>(
         `INSERT INTO public.cases (
         source_provider,
+        mailbox_id,
         provider_message_id,
         sender_email,
+        subject,
         body_text,
         received_at
         )
-        VALUES ($1, $2, $3, $4, clock_timestamp())
+        VALUES ($1, $2, $3, $4, $5, $6, clock_timestamp())
         RETURNING id`,
         [
             'processing-job-integration-test',
+            'integration-test-mailbox',
             providerMessageId,
             'test@example.com',
             'Case created by processing-job integration tests',
+            'Integration test body',
         ],
     )
 
@@ -82,29 +86,15 @@ describe('processing_jobs PostgreSQL integration', () => {
             WHERE rolname = current_user`,
         )
 
-        expect(result.rows[0]?.database_name).toBe('migration005_check')
+        expect(result.rows[0]?.database_name).toBe('service_request_agent_test')
         expect(result.rows[0]?.is_superuser).toBe(true)
     })
 
     afterAll(async () => {
-        try {
-            if (createdCaseIds.length > 0) {
-                await pool.query(
-                    'DELETE FROM public.processing_jobs WHERE case_id = ANY($1::uuid[])',
-                    [createdCaseIds],
-                )
-
-                await pool.query(
-                    'DELETE FROM public.cases WHERE id = ANY($1::uuid[])',
-                    [createdCaseIds],
-                )
-            }
-        } finally {
-            await Promise.all([
-                pool.end(),
-                runtimePool.end(),
-            ])
-        }
+        await Promise.all([
+            pool.end(),
+            runtimePool.end(),
+        ])
     })
 
     it('creates a job in the initial PENDING state', async () => {
