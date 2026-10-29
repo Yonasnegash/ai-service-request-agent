@@ -649,10 +649,10 @@ describe('processing_jobs PostgreSQL integration', () => {
             const result = await pool.query(
                 `SELECT *
                 FROM public.claim_processing_job($1, $2, $3)`,
-                ['RECOVER_CASE', 'worker-future', 30],
+                ['CLASSIFY_CASE', 'worker-future', 30],
             )
 
-            expect(result.rows).toHaveLength(0)
+            expect(result.rows.some((row) => row.id === futureJobId)).toBe(false)
 
             const stored = await pool.query<{
                 status: string
