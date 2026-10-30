@@ -11,6 +11,7 @@
         "test:watch": "vitest",
         "test:integration": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/test-integration.ps1",
         "test:integration:vitest": "vitest run --config vitest.integration.config.ts",
+        "evaluate:classification": "npm run build && node dist/modules/classification/classification-evaluation-cli.js",
         "lint": "eslint ."
     },
     "type": "module",
